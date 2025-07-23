@@ -222,46 +222,46 @@
         <div class="controls">
             <div class="control-group">
                 <label for="totalSupply">Total Token Supply</label>
-                <input type="number" id="totalSupply" value="21000000" step="1000">
+                <input type="number" id="totalSupply" value="21000000" step="1000" oninput="updatePoolTokens()">
             </div>
             <div class="control-group">
                 <label for="poolTokens">Pool Token Amount (50%)</label>
-                <input type="number" id="poolTokens" value="10500000" step="1000">
+                <input type="number" id="poolTokens" value="10500000" step="1000" readonly style="background-color: #f8f9fa;">
             </div>
             <div class="control-group">
                 <label for="poolWeth">Pool WETH Value ($)</label>
                 <input type="number" id="poolWeth" value="5000" step="100">
             </div>
             <div class="control-group">
-                <label for="initialTax">Initial Tax (%)</label>
+                <label for="initialTax">Starting Tax Rate (%)</label>
                 <input type="number" id="initialTax" value="30" min="1" max="100">
             </div>
             <div class="control-group">
-                <label for="initialDuration">Initial Period (blocks)</label>
+                <label for="initialDuration">Fixed Tax Period (blocks)</label>
                 <input type="number" id="initialDuration" value="60" min="1">
             </div>
             <div class="control-group">
-                <label for="reductionInterval">Reduction Interval (blocks)</label>
+                <label for="reductionInterval">Tax Reduction Interval (blocks)</label>
                 <input type="number" id="reductionInterval" value="15" min="1">
             </div>
             <div class="control-group">
-                <label for="reductionRate">Reduction Rate (%/interval)</label>
+                <label for="reductionRate">Tax Reduction Rate (%/interval)</label>
                 <input type="number" id="reductionRate" value="1" min="1" max="10">
             </div>
             <div class="control-group">
                 <label for="targetPercent">Target Purchase (% of supply)</label>
-                <input type="number" id="targetPercent" value="40" min="1" max="100">
+                <input type="number" id="targetPercent" value="30" min="1" max="100">
             </div>
             <div class="control-group">
                 <label for="totalBudget">Total Budget ($)</label>
-                <input type="number" id="totalBudget" value="10000" step="100" min="100">
+                <input type="number" id="totalBudget" value="45000" step="100" min="100">
             </div>
             <div class="control-group">
                 <label for="strategy">Buying Strategy</label>
                 <select id="strategy">
                     <option value="uniform">Uniform Distribution</option>
                     <option value="weighted">Tax-Weighted (More at Low Tax)</option>
-                    <option value="aggressive">Aggressive (Wait for Low Tax)</option>
+                    <option value="aggressive">Aggressive (Buy at High Tax)</option>
                 </select>
             </div>
         </div>
@@ -286,7 +286,11 @@
             </div>
             <div class="stat-card">
                 <div class="stat-value" id="tokensAcquired">0</div>
-                <div class="stat-label">Tokens Acquired</div>
+                <div class="stat-label">User Token Holdings</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalTaxPaid">0</div>
+                <div class="stat-label">Tax to Treasury (Tokens)</div>
             </div>
             <div class="stat-card">
                 <div class="stat-value" id="targetAchieved">0%</div>
@@ -295,6 +299,14 @@
             <div class="stat-card">
                 <div class="stat-value" id="totalBlocks">0</div>
                 <div class="stat-label">Total Blocks</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="userOwnership">0%</div>
+                <div class="stat-label">User Ownership %</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="treasuryOwnership">0%</div>
+                <div class="stat-label">Treasury Ownership %</div>
             </div>
         </div>
 
@@ -309,11 +321,13 @@
                             <th>Block</th>
                             <th>Tax Rate (%)</th>
                             <th>Purchase ($)</th>
-                            <th>Tokens Bought</th>
+                            <th>Tax (Tokens)</th>
+                            <th>Tokens to User</th>
+                            <th>Total Tokens Bought</th>
                             <th>Cumulative Tokens</th>
+                            <th>Cumulative Tax (Tokens)</th>
                             <th>Token Price ($)</th>
                             <th>Market Cap ($)</th>
-                            <th>Pool Impact (%)</th>
                         </tr>
                     </thead>
                     <tbody id="strategyTableBody">
@@ -324,7 +338,7 @@
 
         <div class="alert alert-info">
             <strong>📈 Model Assumptions:</strong> 
-            • AMM pricing (x*y=k) • Tax applied on purchases • 2 second block time • No other trading activity • Slippage increases with purchase size
+            • AMM pricing (x*y=k) • Tax applied on purchases • 2 second block time • No other trading activity (no external buy pressure) • Slippage increases with purchase size • Ending tax rate is 0
         </div>
     </div>
 
@@ -344,13 +358,18 @@
         }
 
         function calculateTokensFromPurchase(purchaseAmount, poolTokens, poolWeth, taxRate) {
-            // Calculate effective purchase after tax
-            const effectivePurchase = purchaseAmount * (1 - taxRate / 100);
+            // AMM formula: First calculate total tokens that would be received without tax
+            const totalTokensOut = (poolTokens * purchaseAmount) / (poolWeth + purchaseAmount);
             
-            // AMM formula: tokens_out = (pool_tokens * effective_purchase) / (pool_weth + effective_purchase)
-            const tokensOut = (poolTokens * effectivePurchase) / (poolWeth + effectivePurchase);
+            // Then apply tax on the tokens (not on the purchase amount)
+            const taxTokens = totalTokensOut * (taxRate / 100);
+            const userTokens = totalTokensOut - taxTokens;
             
-            return tokensOut;
+            return {
+                totalTokens: totalTokensOut,
+                taxTokens: taxTokens,
+                userTokens: userTokens
+            };
         }
 
         function calculateStrategy() {
@@ -423,27 +442,28 @@
             let currentPoolWeth = poolWeth;
             let tokensAcquired = 0;
             let totalCost = 0;
+            let totalTaxPaidTokens = 0;
             const detailedResults = [];
 
             for (let i = 0; i <= maxBlocks; i++) {
                 const purchaseAmount = totalPurchases[i];
                 if (purchaseAmount > 0) {
                     const taxRate = taxRates[i];
-                    const tokensReceived = calculateTokensFromPurchase(
+                    
+                    const tokenResult = calculateTokensFromPurchase(
                         purchaseAmount, 
                         currentPoolTokens, 
                         currentPoolWeth, 
                         taxRate
                     );
                     
-                    tokensAcquired += tokensReceived;
+                    tokensAcquired += tokenResult.userTokens;
                     totalCost += purchaseAmount;
+                    totalTaxPaidTokens += tokenResult.taxTokens;
                     
-                    // Update pool state
-                    currentPoolTokens -= tokensReceived;
-                    currentPoolWeth += purchaseAmount * (1 - taxRate / 100);
-                    
-                    const poolImpact = (tokensReceived / poolTokens) * 100;
+                    // Update pool state (all purchase amount goes to pool, tokens come out)
+                    currentPoolTokens -= tokenResult.totalTokens;
+                    currentPoolWeth += purchaseAmount;
                     
                     // Calculate token price and market cap after this purchase
                     const tokenPrice = currentPoolWeth / currentPoolTokens;
@@ -453,11 +473,13 @@
                         block: i,
                         taxRate: taxRate,
                         purchase: purchaseAmount,
-                        tokensReceived: tokensReceived,
+                        taxTokens: tokenResult.taxTokens,
+                        userTokens: tokenResult.userTokens,
+                        totalTokensBought: tokenResult.totalTokens,
                         cumulativeTokens: tokensAcquired,
+                        cumulativeTaxTokens: totalTaxPaidTokens,
                         tokenPrice: tokenPrice,
-                        marketCap: marketCap,
-                        poolImpact: poolImpact
+                        marketCap: marketCap
                     });
                 }
                 
@@ -471,9 +493,11 @@
 
             const budgetUtilized = (totalCost / totalBudget) * 100;
             const targetAchieved = (tokensAcquired / targetTokens) * 100;
+            const userOwnership = (tokensAcquired / totalSupply) * 100;
+            const treasuryOwnership = (totalTaxPaidTokens / totalSupply) * 100;
 
             // Update UI
-            updateStats(totalCost, avgTax, tokensAcquired, maxBlocks, budgetUtilized, targetAchieved, totalBudget);
+            updateStats(totalCost, avgTax, tokensAcquired, maxBlocks, budgetUtilized, targetAchieved, totalBudget, totalTaxPaidTokens, userOwnership, treasuryOwnership);
             updateTable(detailedResults);
             
             // Show results
@@ -481,13 +505,16 @@
             document.getElementById('strategyTable').style.display = 'block';
         }
 
-        function updateStats(totalCost, avgTax, tokensAcquired, totalBlocks, budgetUtilized, targetAchieved, totalBudget) {
-            document.getElementById('totalCost').textContent = `${totalCost.toFixed(2)}`;
+        function updateStats(totalCost, avgTax, tokensAcquired, totalBlocks, budgetUtilized, targetAchieved, totalBudget, totalTaxPaidTokens, userOwnership, treasuryOwnership) {
+            document.getElementById('totalCost').textContent = `$${totalCost.toFixed(2)}`;
             document.getElementById('budgetUsed').textContent = `${budgetUtilized.toFixed(1)}%`;
             document.getElementById('avgTax').textContent = `${avgTax.toFixed(2)}%`;
             document.getElementById('tokensAcquired').textContent = tokensAcquired.toFixed(0);
+            document.getElementById('totalTaxPaid').textContent = totalTaxPaidTokens.toFixed(0);
             document.getElementById('targetAchieved').textContent = `${targetAchieved.toFixed(1)}%`;
             document.getElementById('totalBlocks').textContent = totalBlocks;
+            document.getElementById('userOwnership').textContent = `${userOwnership.toFixed(2)}%`;
+            document.getElementById('treasuryOwnership').textContent = `${treasuryOwnership.toFixed(2)}%`;
         }
 
 
@@ -501,14 +528,22 @@
                 row.innerHTML = `
                     <td>${result.block}</td>
                     <td>${result.taxRate.toFixed(1)}%</td>
-                    <td>${result.purchase.toFixed(2)}</td>
-                    <td>${result.tokensReceived.toFixed(0)}</td>
+                    <td>$${result.purchase.toFixed(2)}</td>
+                    <td>${result.taxTokens.toFixed(0)}</td>
+                    <td>${result.userTokens.toFixed(0)}</td>
+                    <td>${result.totalTokensBought.toFixed(0)}</td>
                     <td>${result.cumulativeTokens.toFixed(0)}</td>
-                    <td>${result.tokenPrice.toFixed(6)}</td>
-                    <td>${result.marketCap.toFixed(0)}</td>
-                    <td>${result.poolImpact.toFixed(3)}%</td>
+                    <td>${result.cumulativeTaxTokens.toFixed(0)}</td>
+                    <td>$${result.tokenPrice.toFixed(6)}</td>
+                    <td>$${result.marketCap.toFixed(0)}</td>
                 `;
             });
+        }
+
+        function updatePoolTokens() {
+            const totalSupply = parseFloat(document.getElementById('totalSupply').value) || 0;
+            const poolTokens = totalSupply * 0.5;
+            document.getElementById('poolTokens').value = poolTokens.toFixed(0);
         }
 
         function resetToDefaults() {
